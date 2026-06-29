@@ -1,0 +1,17 @@
+# Render Blueprint — one-click backend deploy (free tier).
+# Frontend deploys separately on Vercel (set VITE_API_URL / VITE_WS_URL to the
+# service URL Render assigns below).
+services:
+  - type: web
+    name: vaultscan-backend
+    runtime: docker
+    dockerfilePath: ./backend/Dockerfile
+    dockerContext: .
+    plan: free
+    healthCheckPath: /health
+    envVars:
+      - key: REPLAY_SPEED_TPS
+        value: "10"
+      - key: CORS_ORIGINS
+        # Update to your deployed Vercel URL after the frontend is live.
+        value: "https://vaultscan.vercel.app,http://localhost:5173"
