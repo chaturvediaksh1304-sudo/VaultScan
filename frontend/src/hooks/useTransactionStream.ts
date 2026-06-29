@@ -3,6 +3,12 @@ import type { ScoredTransaction, Stats } from "../types/transaction";
 
 const MAX_TXNS = 500;
 
+/** Demo mode: replay a bundle of transactions pre-scored by the real Isolation
+ *  Forest, client-side, with no backend. Enabled on the always-on Vercel deploy
+ *  (VITE_DEMO_MODE=true) so the live demo never waits on a backend cold-start. */
+const DEMO = import.meta.env.VITE_DEMO_MODE === "true";
+const DEMO_TPS = 10;
+
 /** Resolve the WebSocket URL. In dev, Vite proxies /ws → backend. In prod,
  *  set VITE_WS_URL to the backend's wss:// endpoint. */
 function wsUrl(): string {
@@ -90,6 +96,7 @@ export function useTransactionStream(): StreamState {
   }, []);
 
   useEffect(() => {
+    if (DEMO) return;
     closedRef.current = false;
     connect();
     return () => {
@@ -100,6 +107,7 @@ export function useTransactionStream(): StreamState {
 
   // Authoritative lifetime stats from the backend (polled).
   useEffect(() => {
+    if (DEMO) return;
     let active = true;
     const poll = async () => {
       try {
@@ -114,6 +122,75 @@ export function useTransactionStream(): StreamState {
     return () => {
       active = false;
       clearInterval(id);
+    };
+  }, []);
+
+  // Demo replay — client-side, real model scores, computed stats. No backend.
+  useEffect(() => {
+    if (!DEMO) return;
+    let cancelled = false;
+    let timer: ReturnType<typeof setTimeout>;
+    let idx = 0;
+    let total = 0;
+    let fraud = 0;
+    const latencies: number[] = [];
+    const flaggedTimes: number[] = [];
+
+    fetch("/demo-stream.json")
+      .then((r) => r.json())
+      .then((payload: { transactions: ScoredTransaction[] }) => {
+        if (cancelled) return;
+        const data = payload.transactions;
+        if (!data.length) return;
+        setIsConnected(true);
+
+        const tick = () => {
+          if (cancelled) return;
+          const base = data[idx % data.length];
+          idx += 1;
+          const txn: ScoredTransaction = {
+            ...base,
+            transaction_id: `txn_${String(idx).padStart(8, "0")}`,
+            timestamp: new Date().toISOString(),
+          };
+
+          total += 1;
+          latencies.push(txn.latency_ms);
+          if (latencies.length > 200) latencies.shift();
+          const now = Date.now();
+          if (txn.flagged) {
+            fraud += 1;
+            flaggedTimes.push(now);
+          }
+          while (flaggedTimes.length && now - flaggedTimes[0] > 60_000) flaggedTimes.shift();
+
+          setTransactions((prev) => {
+            const next = [txn, ...prev];
+            return next.length > MAX_TXNS ? next.slice(0, MAX_TXNS) : next;
+          });
+          setLatest(txn);
+          if (txn.flagged) setLatestFlagged(txn);
+          setStats({
+            total_processed: total,
+            fraud_rate_pct: Math.round((fraud / total) * 10000) / 100,
+            avg_latency_ms:
+              Math.round((latencies.reduce((a, b) => a + b, 0) / latencies.length) * 100) / 100,
+            flagged_last_minute: flaggedTimes.length,
+          });
+
+          // Organic cadence around the target rate.
+          const delay = (1000 / DEMO_TPS) * (0.7 + Math.random() * 0.6);
+          timer = setTimeout(tick, delay);
+        };
+        tick();
+      })
+      .catch(() => {
+        /* demo bundle missing — leave dashboard idle */
+      });
+
+    return () => {
+      cancelled = true;
+      clearTimeout(timer);
     };
   }, []);
 
